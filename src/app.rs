@@ -1251,11 +1251,11 @@ impl App {
             self.draw_workspace(frame, regions[1]);
         }
         let top = Layout::horizontal([
-            Constraint::Min(8),
+            Constraint::Min(0),
             Constraint::Length(10),
             Constraint::Length(16),
-            Constraint::Length(13),
-            Constraint::Length(10),
+            Constraint::Length(14),
+            Constraint::Length(11),
         ])
         .split(regions[0]);
         frame.render_widget(
@@ -2206,6 +2206,31 @@ mod tests {
         });
         assert_eq!(a.row, 4);
         assert_eq!(a.focus, 2);
+    }
+    #[test]
+    fn toolbar_labels_have_balanced_padding() {
+        for width in [55, 80, 100, 120] {
+            let mut terminal =
+                Terminal::new(ratatui::backend::TestBackend::new(width, 40)).unwrap();
+            let mut a = app();
+            terminal.draw(|f| a.draw(f)).unwrap();
+            let buffer = terminal.backend().buffer();
+            for (button, label) in
+                a.buttons
+                    .iter()
+                    .zip(["F5 Run", "F2 Connections", "F3 Refresh", "F1 Help"])
+            {
+                let text: String = (button.x + 1..button.right() - 1)
+                    .map(|x| buffer[(x, button.y + 1)].symbol())
+                    .collect();
+                assert_eq!(text.trim(), label, "toolbar at width {width}");
+                assert_eq!(
+                    text.len() - text.trim_start().len(),
+                    text.len() - text.trim_end().len(),
+                    "unbalanced padding for {label} at width {width}: {text:?}"
+                );
+            }
+        }
     }
     #[test]
     fn all_screens_render_at_supported_sizes() {
