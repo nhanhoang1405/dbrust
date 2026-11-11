@@ -1,6 +1,10 @@
 mod app;
+mod clipboard;
 mod connection;
 mod db;
+mod redis_browser;
+mod redis_db;
+mod schema;
 
 use anyhow::Result;
 use crossterm::{
@@ -23,7 +27,7 @@ impl Drop for TerminalGuard {
 async fn main() -> Result<()> {
     if std::env::args().any(|a| a == "--help" || a == "-h") {
         println!(
-            "dbrust — terminal SQL workbench\n\nUsage: cargo run --release\n\nConnect to PostgreSQL, MySQL, or SQLite using the startup form.\nF1 help · F5 execute · F2 connections · Ctrl+Q quit"
+            "dbrust — terminal database workbench\n\nUsage: cargo run --release\n\nConnect to PostgreSQL, MySQL, SQLite, Redis, Valkey, or KeyDB using the startup form.\nF1 help · F5 execute · F2 connections · Ctrl+Q quit"
         );
         return Ok(());
     }

@@ -20,8 +20,13 @@ impl SavedConnection {
             });
         }
         let mut url = Url::parse(raw).context("Invalid connection URL")?;
-        if !matches!(url.scheme(), "postgres" | "postgresql" | "mysql") {
-            bail!("Use postgres://, postgresql://, mysql://, or sqlite:");
+        if !matches!(
+            url.scheme(),
+            "postgres" | "postgresql" | "mysql" | "redis" | "rediss" | "valkey" | "keydb"
+        ) {
+            bail!(
+                "Use postgres://, mysql://, sqlite:, redis://, rediss://, valkey://, or keydb://"
+            );
         }
         let mut secret = url.password().is_some();
         url.set_password(None)
@@ -69,8 +74,11 @@ pub fn manual_url(
     user: &str,
     password: &str,
 ) -> Result<String> {
-    if !matches!(driver, "postgres" | "mysql" | "sqlite") {
-        bail!("Driver must be postgres, mysql, or sqlite");
+    if !matches!(
+        driver,
+        "postgres" | "mysql" | "sqlite" | "redis" | "rediss" | "valkey" | "keydb"
+    ) {
+        bail!("Driver must be postgres, mysql, sqlite, redis, rediss, valkey, or keydb");
     }
     if driver == "sqlite" {
         if db.is_empty() {
@@ -82,7 +90,8 @@ pub fn manual_url(
             format!("sqlite://{db}?mode=rwc")
         });
     }
-    if host.is_empty() || db.is_empty() || user.is_empty() {
+    let redis = matches!(driver, "redis" | "rediss" | "valkey" | "keydb");
+    if host.is_empty() || (!redis && (db.is_empty() || user.is_empty())) {
         bail!("Host, database, and username are required");
     }
     let mut url = Url::parse(&format!("{driver}://localhost"))?;
@@ -93,7 +102,13 @@ pub fn manual_url(
     };
     url.set_host(Some(&host)).context("Invalid host")?;
     let port = if port.is_empty() {
-        if driver == "mysql" { 3306 } else { 5432 }
+        if driver == "mysql" {
+            3306
+        } else if redis {
+            6379
+        } else {
+            5432
+        }
     } else {
         port.parse::<u16>().context("Port must be 1–65535")?
     };
@@ -104,9 +119,21 @@ pub fn manual_url(
         .map_err(|_| anyhow::anyhow!("Invalid port"))?;
     url.set_username(&encode_component(user))
         .map_err(|_| anyhow::anyhow!("Invalid username"))?;
-    url.set_password(Some(&encode_component(password)))
-        .map_err(|_| anyhow::anyhow!("Invalid password"))?;
-    url.set_path(&encode_component(db));
+    if !redis || !password.is_empty() {
+        url.set_password(Some(&encode_component(password)))
+            .map_err(|_| anyhow::anyhow!("Invalid password"))?;
+    }
+    if redis {
+        let index = if db.is_empty() {
+            0
+        } else {
+            db.parse::<u32>()
+                .context("Redis database must be a nonnegative number")?
+        };
+        url.set_path(&index.to_string());
+    } else {
+        url.set_path(&encode_component(db));
+    }
     Ok(url.into())
 }
 
@@ -231,5 +258,26 @@ mod tests {
                 .password(),
             Some("p%252Fword")
         );
+    }
+    #[test]
+    fn redis_manual_defaults_and_password_history() {
+        for driver in ["redis", "rediss", "valkey", "keydb"] {
+            let raw = manual_url(driver, "localhost", "", "", "", "").unwrap();
+            let parsed = Url::parse(&raw).unwrap();
+            assert_eq!(parsed.port(), Some(6379));
+            assert_eq!(parsed.path(), "/0");
+            assert!(parsed.password().is_none());
+            let raw = manual_url(driver, "localhost", "", "2", "default", "p%word").unwrap();
+            let saved = SavedConnection::from_url(&raw).unwrap();
+            assert!(saved.needs_password);
+            assert!(!saved.url.contains("p%25word"));
+            assert_eq!(
+                Url::parse(&saved.with_password("p%word").unwrap())
+                    .unwrap()
+                    .password(),
+                Some("p%25word")
+            );
+        }
+        assert!(manual_url("redis", "localhost", "", "abc", "", "").is_err());
     }
 }

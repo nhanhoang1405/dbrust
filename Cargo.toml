@@ -9,11 +9,14 @@ repository = "https://github.com/nhanhoang1405/dbrust"
 
 [dependencies]
 anyhow = "1"
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
 chrono = "0.4"
 crossterm = "0.29"
 directories = "6"
 futures-util = "0.3"
 percent-encoding = "2"
+redis = { version = "0.32.7", default-features = false, features = ["tokio-rustls-comp", "tls-rustls-webpki-roots"] }
+shell-words = "1"
 ratatui = "0.30.2"
 ratatui-textarea = "0.9.4"
 rust_decimal = "1"

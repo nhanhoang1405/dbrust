@@ -8,6 +8,7 @@ pub enum Database {
     Postgres(sqlx::PgConnection),
     Mysql(sqlx::MySqlConnection),
     Sqlite(sqlx::SqliteConnection),
+    Redis(Box<crate::redis_db::RedisStore>),
 }
 #[derive(Clone, Debug)]
 pub struct TableName {
@@ -109,6 +110,11 @@ impl Database {
                 Self::Mysql(sqlx::MySqlConnection::connect(url).await?)
             } else if url.starts_with("sqlite:") {
                 Self::Sqlite(sqlx::SqliteConnection::connect(url).await?)
+            } else if ["redis:", "rediss:", "valkey:", "keydb:"]
+                .iter()
+                .any(|prefix| url.starts_with(prefix))
+            {
+                Self::Redis(Box::new(crate::redis_db::RedisStore::connect(url).await?))
             } else {
                 bail!("Unsupported URL scheme")
             },
@@ -117,6 +123,9 @@ impl Database {
     pub async fn execute(&mut self, sql: &str) -> Result<QueryResult> {
         if sql.trim().is_empty() {
             bail!("Write a query first");
+        }
+        if let Self::Redis(store) = self {
+            return store.execute(sql).await;
         }
         let start = Instant::now();
         let mut result = match self {
@@ -144,6 +153,7 @@ impl Database {
                 serde_json::Value,
                 rust_decimal::Decimal
             ),
+            Self::Redis(_) => unreachable!(),
             Self::Sqlite(c) => execute!(
                 c,
                 sql,
@@ -155,8 +165,53 @@ impl Database {
         result.elapsed_ms = start.elapsed().as_millis();
         Ok(result)
     }
+    pub fn redis_snapshot(&self) -> crate::redis_browser::BrowserSnapshot {
+        if let Self::Redis(store) = self {
+            store.snapshot()
+        } else {
+            Default::default()
+        }
+    }
+    pub fn configure_redis(
+        &mut self,
+        filter: crate::redis_browser::KeyFilter,
+        restart: bool,
+    ) -> Result<()> {
+        if let Self::Redis(store) = self {
+            store.set_filter(filter)?;
+            if restart {
+                store.restart();
+            }
+        }
+        Ok(())
+    }
+    pub fn browser_summary(&self) -> String {
+        if let Self::Redis(store) = self {
+            store.summary()
+        } else {
+            String::new()
+        }
+    }
+    pub fn is_redis(&self) -> bool {
+        matches!(self, Self::Redis(_))
+    }
+    pub async fn inspect(
+        &mut self,
+        table: &TableName,
+        view: crate::schema::TableView,
+    ) -> Result<QueryResult> {
+        if let Self::Redis(store) = self {
+            return store.inspect(&table.name).await;
+        }
+        let sql = crate::schema::metadata_sql(self, table, view);
+        self.execute(&sql).await
+    }
     pub async fn tables(&mut self) -> Result<Vec<TableName>> {
+        if let Self::Redis(store) = self {
+            return store.keys().await;
+        }
         let sql = match self {
+            Self::Redis(_) => unreachable!(),
             Self::Postgres(_) => {
                 "SELECT table_schema, table_name FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema') ORDER BY table_schema, table_name"
             }
@@ -242,6 +297,29 @@ mod tests {
         assert!(db.execute("SELECT broken FROM nowhere").await.is_err());
         assert_eq!(db.execute("SELECT 1 AS ok").await.unwrap().rows[0][0], "1");
         assert!(db.tables().await.is_ok());
+        db.execute("CREATE UNIQUE INDEX dbrust_test_id ON dbrust_test(id); CREATE TEMP TABLE dbrust_child (parent integer REFERENCES dbrust_test(id), doubled integer GENERATED ALWAYS AS (parent*2) STORED)").await.unwrap();
+        let schema = db
+            .execute("SELECT nspname FROM pg_namespace WHERE oid=pg_my_temp_schema()")
+            .await
+            .unwrap()
+            .rows[0][0]
+            .clone();
+        let table = TableName {
+            schema,
+            name: "dbrust_child".into(),
+        };
+        for view in crate::schema::TableView::ALL {
+            let r = db.inspect(&table, view).await.unwrap();
+            if view == crate::schema::TableView::Columns {
+                assert_eq!(r.rows.len(), 2);
+            }
+            if view == crate::schema::TableView::ForeignKeys {
+                assert_eq!(r.rows.len(), 1);
+            }
+            if view == crate::schema::TableView::Definition {
+                assert!(r.rows.iter().any(|r| r[2].contains("GENERATED ALWAYS AS")));
+            }
+        }
         db.execute("BEGIN").await.unwrap();
         db.execute("INSERT INTO dbrust_test VALUES (8); INSERT INTO dbrust_test VALUES (9);")
             .await
@@ -266,5 +344,29 @@ mod tests {
             .unwrap();
         assert_eq!(r.rows[0], ["42", "1.25", "NULL"]);
         assert!(db.tables().await.is_ok());
+        db.execute("CREATE TABLE dbrust_parent(id INTEGER PRIMARY KEY); CREATE TABLE dbrust_child(id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES dbrust_parent(id), name VARCHAR(50) DEFAULT 'hello'); CREATE INDEX dbrust_child_name ON dbrust_child(name);").await.unwrap();
+        let schema = db.execute("SELECT DATABASE()").await.unwrap().rows[0][0].clone();
+        let table = TableName {
+            schema,
+            name: "dbrust_child".into(),
+        };
+        for view in crate::schema::TableView::ALL {
+            let r = db.inspect(&table, view).await.unwrap();
+            if view == crate::schema::TableView::Columns {
+                assert_eq!(r.rows.len(), 3);
+            }
+            if view == crate::schema::TableView::Indexes {
+                assert!(r.rows.len() >= 2);
+            }
+            if view == crate::schema::TableView::ForeignKeys {
+                assert_eq!(r.rows.len(), 1);
+            }
+            if view == crate::schema::TableView::Definition {
+                assert!(r.rows[0][1].contains("CREATE TABLE"));
+            }
+        }
+        db.execute("DROP TABLE dbrust_child; DROP TABLE dbrust_parent;")
+            .await
+            .unwrap();
     }
 }
